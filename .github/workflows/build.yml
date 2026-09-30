@@ -1,0 +1,259 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.7
+      - name: Create project
+        run: |
+          cat > settings.gradle.kts <<'EOF_0'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "StrobeLight"
+          include(":app")
+          EOF_0
+          cat > build.gradle.kts <<'EOF_1'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF_1
+          cat > gradle.properties <<'EOF_2'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          EOF_2
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF_3'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.strobe"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.strobe"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              buildFeatures { compose = true }
+              composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
+              kotlinOptions { jvmTarget = "17" }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+          }
+          dependencies {
+              implementation(platform("androidx.compose:compose-bom:2024.06.00"))
+              implementation("androidx.compose.material3:material3")
+              implementation("androidx.compose.ui:ui")
+              implementation("androidx.activity:activity-compose:1.9.0")
+          }
+          EOF_3
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF_4'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-feature android:name="android.hardware.camera.flash" android:required="true" />
+              <application
+                  android:label="爆闪"
+                  android:theme="@style/AppTheme">
+                  <activity android:name=".MainActivity" android:exported="true"
+                      android:screenOrientation="portrait">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF_4
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'EOF_5'
+          <resources>
+              <style name="AppTheme" parent="@android:style/Theme.DeviceDefault.NoActionBar">
+                  <item name="android:windowBackground">@android:color/black</item>
+                  <item name="android:statusBarColor">@android:color/black</item>
+                  <item name="android:navigationBarColor">@android:color/black</item>
+              </style>
+          </resources>
+          EOF_5
+          mkdir -p app/src/main/java/com/example/strobe
+          cat > app/src/main/java/com/example/strobe/MainActivity.kt <<'EOF_6'
+          package com.example.strobe
+
+          import android.content.Context
+          import android.hardware.camera2.CameraCharacteristics
+          import android.hardware.camera2.CameraManager
+          import android.os.Bundle
+          import android.os.SystemClock
+          import android.view.WindowManager
+          import androidx.activity.ComponentActivity
+          import androidx.activity.compose.setContent
+          import androidx.compose.foundation.background
+          import androidx.compose.foundation.clickable
+          import androidx.compose.foundation.layout.*
+          import androidx.compose.foundation.shape.CircleShape
+          import androidx.compose.foundation.shape.RoundedCornerShape
+          import androidx.compose.material3.*
+          import androidx.compose.runtime.*
+          import androidx.compose.ui.Alignment
+          import androidx.compose.ui.Modifier
+          import androidx.compose.ui.draw.shadow
+          import androidx.compose.ui.graphics.Color
+          import androidx.compose.ui.platform.LocalContext
+          import androidx.compose.ui.text.font.FontWeight
+          import androidx.compose.ui.unit.dp
+          import androidx.compose.ui.unit.sp
+          import kotlinx.coroutines.delay
+
+          private val Bg = Color.Black
+          private val Card = Color(0xFF1C1C1E)
+          private val Blue = Color(0xFF0A84FF)
+          private val Orange = Color(0xFFFF9F0A)
+          private val Green = Color(0xFF30D158)
+          private val Gray = Color(0xFF8E8E93)
+          private val Track = Color(0xFF3A3A3C)
+
+          class MainActivity : ComponentActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                  setContent { App() }
+              }
+          }
+
+          @Composable
+          fun App() {
+              val ctx = LocalContext.current
+              val cm = remember { ctx.getSystemService(Context.CAMERA_SERVICE) as CameraManager }
+              val camId = remember {
+                  cm.cameraIdList.firstOrNull {
+                      cm.getCameraCharacteristics(it).get(CameraCharacteristics.FLASH_INFO_AVAILABLE) == true
+                  }
+              }
+              fun torch(on: Boolean) {
+                  try { camId?.let { cm.setTorchMode(it, on) } } catch (_: Exception) {}
+              }
+
+              var running by remember { mutableStateOf(false) }
+              var strobe by remember { mutableStateOf(true) }
+              var hz by remember { mutableStateOf(10f) }
+              var auto by remember { mutableStateOf(false) }
+              var onSec by remember { mutableStateOf(5f) }
+              var offSec by remember { mutableStateOf(3f) }
+
+              LaunchedEffect(running, strobe, hz, auto, onSec, offSec) {
+                  if (!running) { torch(false); return@LaunchedEffect }
+                  try {
+                      if (!strobe && !auto) { torch(true); awaitCancellationForever(); return@LaunchedEffect }
+                      while (true) {
+                          val end = if (auto) SystemClock.elapsedRealtime() + (onSec * 1000).toLong() else Long.MAX_VALUE
+                          if (strobe) {
+                              val half = (500f / hz).toLong().coerceAtLeast(1)
+                              while (SystemClock.elapsedRealtime() < end) {
+                                  torch(true); delay(half); torch(false); delay(half)
+                              }
+                          } else {
+                              torch(true); delay((onSec * 1000).toLong()); torch(false)
+                          }
+                          delay((offSec * 1000).toLong())
+                      }
+                  } finally { torch(false) }
+              }
+
+              Column(
+                  Modifier.fillMaxSize().background(Bg).statusBarsPadding().navigationBarsPadding()
+                      .padding(20.dp),
+                  horizontalAlignment = Alignment.CenterHorizontally
+              ) {
+                  Text("爆闪", color = Color.White, fontSize = 34.sp, fontWeight = FontWeight.Bold,
+                      modifier = Modifier.fillMaxWidth().padding(top = 8.dp, bottom = 24.dp))
+
+                  Box(
+                      Modifier.size(200.dp)
+                          .shadow(if (running) 40.dp else 0.dp, CircleShape, ambientColor = Orange, spotColor = Orange)
+                          .background(if (running) Orange else Card, CircleShape)
+                          .clickable { running = !running },
+                      contentAlignment = Alignment.Center
+                  ) {
+                      Text(if (running) "停止" else "开始",
+                          color = if (running) Color.Black else Color.White,
+                          fontSize = 30.sp, fontWeight = FontWeight.SemiBold)
+                  }
+                  Spacer(Modifier.height(28.dp))
+
+                  Panel {
+                      Row2("爆闪模式", strobe, { strobe = it })
+                      if (strobe) {
+                          Spacer(Modifier.height(12.dp))
+                          Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                              Text("频率", color = Color.White, fontSize = 17.sp)
+                              Text("${hz.toInt()} Hz", color = Blue, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                          }
+                          Slider(hz, { hz = it }, valueRange = 1f..50f, colors = sliderColors())
+                      }
+                  }
+                  Spacer(Modifier.height(14.dp))
+                  Panel {
+                      Row2("自动开关", auto, { auto = it })
+                      if (auto) {
+                          Spacer(Modifier.height(12.dp))
+                          LabeledSlider("亮 ${onSec.toInt()} 秒", onSec, 1f..60f) { onSec = it }
+                          LabeledSlider("灭 ${offSec.toInt()} 秒", offSec, 1f..60f) { offSec = it }
+                      }
+                  }
+                  Spacer(Modifier.weight(1f))
+                  Text("注意：高频闪光可能诱发光敏性癫痫；实际最高频率受手机硬件限制。",
+                      color = Gray, fontSize = 12.sp)
+              }
+          }
+
+          private suspend fun awaitCancellationForever() { kotlinx.coroutines.awaitCancellation() }
+
+          @Composable
+          private fun sliderColors() = SliderDefaults.colors(
+              thumbColor = Color.White, activeTrackColor = Blue, inactiveTrackColor = Track)
+
+          @Composable
+          private fun Panel(content: @Composable ColumnScope.() -> Unit) {
+              Column(Modifier.fillMaxWidth().background(Card, RoundedCornerShape(20.dp)).padding(18.dp),
+                  content = content)
+          }
+
+          @Composable
+          private fun Row2(title: String, v: Boolean, onChange: (Boolean) -> Unit) {
+              Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+                  verticalAlignment = Alignment.CenterVertically) {
+                  Text(title, color = Color.White, fontSize = 17.sp)
+                  Switch(v, onChange, colors = SwitchDefaults.colors(
+                      checkedTrackColor = Green, checkedThumbColor = Color.White,
+                      uncheckedTrackColor = Track, uncheckedThumbColor = Color.White,
+                      uncheckedBorderColor = Track, checkedBorderColor = Green))
+              }
+          }
+
+          @Composable
+          private fun LabeledSlider(label: String, v: Float, r: ClosedFloatingPointRange<Float>, onChange: (Float) -> Unit) {
+              Text(label, color = Gray, fontSize = 14.sp)
+              Slider(v, onChange, valueRange = r, colors = sliderColors())
+          }
+          EOF_6
+      - name: Build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: StrobeLight-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
